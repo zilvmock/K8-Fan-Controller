@@ -1,0 +1,103 @@
+# K8 Fan Controller Configuration (TOML)
+#
+# This file is installed to /etc/k8-fan-controller-config.toml with your
+# system-specific fan paths. Edit and run `k8fc reload` to apply changes.
+
+# check_interval: seconds between control loop iterations
+check_interval = 5
+
+# averaging_samples: number of recent samples to average per sensor
+averaging_samples = 6
+
+# min_change_interval: seconds to wait between applying speed changes
+min_change_interval = 2
+
+# min_speed_change: minimum percent delta before applying changes
+min_speed_change = 3
+
+# max_fan_speed: upper bound for duty cycle (percent)
+max_fan_speed = 100
+
+# hysteresis: temperature hysteresis (°C) to avoid oscillation on downshift
+hysteresis = 3
+
+# emergency_temp: force max speed at/above this temperature (°C)
+emergency_temp = 75
+
+# critical_temp: restore automatic mode for safety at/above this temperature (°C)
+critical_temp = 85
+
+# ramp_start: temperature (°C) where the ramp begins
+ramp_start = 50
+
+# ramp_range: degrees (°C) from ramp_start to reach max_fan_speed
+ramp_range = 15
+
+# curve_min_speed: percent duty when at/below (ramp_start - hysteresis if above min)
+curve_min_speed = 20
+
+# rpm_ignore_floor: skip lowering speed if estimated RPM would drop below this (RPM)
+rpm_ignore_floor = 800
+
+# cpu_auto: if true, leave CPU fan(s) in motherboard automatic mode
+cpu_auto = false
+
+# roles: roles under control; if absent, inferred from fans[]
+# roles = ["cpu", "case"]
+
+# sensor_whitelist: adapters to parse from `sensors -j`
+sensor_whitelist = [
+  "it8613-isa-0a30",        # Super I/O
+  "k10temp-pci-00c3",       # AMD CPU
+  "amdgpu-pci-c600",        # AMD dGPU/iGPU
+  "nvme-pci-0500",          # NVMe
+  "spd5118-i2c-1-50",
+  "spd5118-i2c-1-51",
+]
+
+# critical_sensors_by_role: select governing adapters per role (fallback: all)
+[critical_sensors_by_role]
+cpu = ["k10temp-pci-00c3", "amdgpu-pci-c600"]
+case = ["nvme-pci-0500"]
+
+# Fans (installer populates these based on your hardware)
+# [[fans]]
+# name = "pwm1"
+# role = "cpu"
+# pwm_path = "/sys/class/hwmon/hwmon0/pwm1"
+# enable_path = "/sys/class/hwmon/hwmon0/pwm1_enable"
+# rpm_path = "/sys/class/hwmon/hwmon0/fan1_input"
+
+# [[fans]]
+# name = "pwm2"
+# role = "case"
+# pwm_path = "/sys/class/hwmon/hwmon0/pwm2"
+# enable_path = "/sys/class/hwmon/hwmon0/pwm2_enable"
+# rpm_path = "/sys/class/hwmon/hwmon0/fan2_input"
+
+# Example presets (commented). Copy values into top-level if desired.
+#
+# [preset.safest]
+# ramp_start = 50
+# ramp_range = 15
+# curve_min_speed = 15
+# cpu_auto = true
+# rpm_ignore_floor = 800
+# roles = ["case"]
+#
+# [preset.standart]  # default-like
+# ramp_start = 50
+# ramp_range = 15
+# curve_min_speed = 20
+# cpu_auto = false
+# rpm_ignore_floor = 800
+# roles = ["cpu", "case"]
+#
+# [preset.aggresive]
+# ramp_start = 40
+# ramp_range = 10
+# curve_min_speed = 30
+# cpu_auto = false
+# rpm_ignore_floor = 1000
+# roles = ["cpu", "case"]
+
