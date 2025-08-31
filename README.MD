@@ -22,11 +22,9 @@ git clone https://github.com/zilvmock/K8-Fan-Controller.git && \
   sudo ./install.sh
 ```
 
-Then edit `/etc/k8-fan-controller-config.toml` and run `k8fc reload`.
-
 Helpful commands: `k8fc status`, `k8fc log`, `k8fc reload`, `k8fc stop`.
 
 #### Uninstall
 `sudo ./uninstall.sh` removes the service, config, logs, helper, and restores fans to automatic.
 
-For configuration details and advanced topics, see the repository wiki.
+For configuration details and advanced topics, see the [wiki](https://github.com/zilvmock/K8-Fan-Controller/wiki)
