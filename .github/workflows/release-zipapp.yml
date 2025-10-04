@@ -1,0 +1,59 @@
+name: Build Release Zipapp
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-zipapp:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: '3.11'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Prepare environment
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python -m pip install --upgrade pip
+          version="$RELEASE_TAG"
+          if [ -z "$version" ]; then
+            version="${REF_NAME//\//-}"
+          fi
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist
+
+      - name: Build zipapp bundle
+        run: |
+          python -m zipapp k8_fan_controller \
+            -p "/usr/bin/env python3" \
+            -o "dist/k8-fan-controller-${RELEASE_VERSION}.pyz"
+          cp k8-config-default.toml dist/
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8-fan-controller-${{ env.RELEASE_VERSION }}
+          path: dist
+
+      - name: Attach assets to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/k8-fan-controller-${{ env.RELEASE_VERSION }}.pyz
+            dist/k8-config-default.toml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
