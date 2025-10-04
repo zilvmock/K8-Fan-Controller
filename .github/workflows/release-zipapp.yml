@@ -47,9 +47,7 @@ jobs:
 
       - name: Build zipapp bundle
         run: |
-          python -m zipapp k8_fan_controller \
-            -p "/usr/bin/env python3" \
-            -o "dist/k8-fan-controller-${RELEASE_VERSION}.pyz"
+          python scripts/build_zipapp.py "dist/k8-fan-controller-${RELEASE_VERSION}.pyz"
           cp k8-config-default.toml dist/
 
       - name: Assemble release archive

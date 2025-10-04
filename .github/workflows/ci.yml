@@ -48,23 +48,7 @@ jobs:
           PY
 
       - name: Build installer-style zipapp bundle
-        run: |
-          set -euo pipefail
-          TMP_ZIP_DIR=$(mktemp -d)
-          TMP_BUILD_DIR=$(mktemp -d)
-          cp -a k8_fan_controller "$TMP_BUILD_DIR/"
-          find "$TMP_BUILD_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} +
-          cat <<'PY' > "$TMP_BUILD_DIR/__main__.py"
-          from k8_fan_controller.__main__ import main
-
-          if __name__ == "__main__":
-              main()
-          PY
-          python -m zipapp "$TMP_BUILD_DIR" \
-            -p "/usr/bin/env python3" \
-            -o "$TMP_ZIP_DIR/k8-fan-controller-test.pyz"
-          mv "$TMP_ZIP_DIR/k8-fan-controller-test.pyz" k8-fan-controller-test.pyz
-          rm -rf "$TMP_ZIP_DIR" "$TMP_BUILD_DIR"
+        run: python scripts/build_zipapp.py k8-fan-controller-test.pyz
 
       - name: Verify zipapp importability
         run: |
