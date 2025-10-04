@@ -479,42 +479,60 @@ mkdir -p /var/log
 
 echo "Locating zipapp bundle..."
 ZIPAPP_SRC=""
-if [[ -f "k8-fan-controller.pyz" ]]; then
-  ZIPAPP_SRC="k8-fan-controller.pyz"
-else
-  shopt -s nullglob
-  mapfile -t _zip_matches < <(printf '%s\n' k8-fan-controller-*.pyz | sort)
-  shopt -u nullglob
-  if [[ ${#_zip_matches[@]} -gt 0 ]]; then
-    last_index=$(( ${#_zip_matches[@]} - 1 ))
-    ZIPAPP_SRC="${_zip_matches[$last_index]}"
-  fi
+declare -a _zip_candidates=()
+shopt -s nullglob
+mapfile -t _zip_candidates < <(printf '%s\n' *.pyz | sort)
+shopt -u nullglob
+
+if (( ${#_zip_candidates[@]} == 0 )); then
+  echo "Error: release bundle missing pre-built .pyz archive"
+  echo "       Download the latest release archive and re-run install.sh"
+  exit 1
 fi
 
-TMP_ZIPAPP_DIR=""
-if [[ -z "$ZIPAPP_SRC" ]]; then
-  if [[ -d "k8_fan_controller" ]]; then
-    echo "No prebuilt zipapp found; building from local sources..."
-    TMP_ZIPAPP_DIR=$(mktemp -d)
-    python3 -m zipapp k8_fan_controller \
-      -p "/usr/bin/env python3" \
-      -o "$TMP_ZIPAPP_DIR/k8-fan-controller.pyz"
-    ZIPAPP_SRC="$TMP_ZIPAPP_DIR/k8-fan-controller.pyz"
-  else
-    echo "Error: zipapp bundle not found and source directory 'k8_fan_controller' unavailable"
-    exit 1
+for candidate in "${_zip_candidates[@]}"; do
+  if [[ $candidate == k8-fan-controller*.pyz ]]; then
+    ZIPAPP_SRC="$candidate"
   fi
+done
+
+if [[ -z "$ZIPAPP_SRC" ]]; then
+  ZIPAPP_SRC="${_zip_candidates[-1]}"
+fi
+
+if (( ${#_zip_candidates[@]} > 1 )); then
+  echo "Warning: multiple .pyz archives found; using $ZIPAPP_SRC"
+fi
+
+if python3 - "$ZIPAPP_SRC" <<'PY'
+import sys
+import zipfile
+
+path = sys.argv[1]
+try:
+    with zipfile.ZipFile(path) as zf:
+        names = set(zf.namelist())
+except Exception:
+    sys.exit(1)
+
+required = {'__main__.py'}
+alt_required = {'k8_fan_controller/__main__.py'}
+
+has_entrypoint = bool(required & names or alt_required & names)
+
+sys.exit(0 if has_entrypoint else 1)
+PY
+then
+  echo "Using release bundle: $ZIPAPP_SRC"
 else
-  echo "Using existing bundle: $ZIPAPP_SRC"
+  echo "Error: $ZIPAPP_SRC is not a valid k8-fan-controller release bundle"
+  echo "       Re-download the official release archive and re-run install.sh"
+  exit 1
 fi
 
 echo "Copying bundle to $INSTALL_ROOT..."
 cp "$ZIPAPP_SRC" "$INSTALL_ROOT/k8-fan-controller.pyz"
 chmod 755 "$INSTALL_ROOT/k8-fan-controller.pyz"
-
-if [[ -n "$TMP_ZIPAPP_DIR" ]]; then
-  rm -rf "$TMP_ZIPAPP_DIR"
-fi
 
 # Install systemd service
 echo "Installing systemd service..."

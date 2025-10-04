@@ -26,15 +26,6 @@ sudo ./install.sh
 
 The archive contains the controller bundle (`.pyz`), default config, and helper scripts. To install a specific release, set `TAG` manually (for example `TAG=v1.0`).
 
-**Alternative: clone the main branch**
-
-```
-git clone https://github.com/zilvmock/K8-Fan-Controller.git && \
-  cd K8-Fan-Controller && \
-  chmod +x install.sh uninstall.sh && \
-  sudo ./install.sh
-```
-
 Helpful commands: `k8fc status`, `k8fc log`, `k8fc reload`, `k8fc stop`.
 
 #### Uninstall
