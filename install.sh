@@ -83,16 +83,7 @@ PY
 
 echo
 echo "IMPORTANT: Adapters in the config must match your system for correct operation."
-read -r -p "Do the adapters match? [y/N]: " ADAPT_OK
-case "${ADAPT_OK,,}" in
-  y|yes) ;;
-  *) echo "Adapters do not match. Please edit k8-config-default.toml and re-run. Exiting."; exit 1;;
-esac
-read -r -p "Are you sure they match? [y/N]: " ADAPT_SURE
-case "${ADAPT_SURE,,}" in
-  y|yes) echo "Adapters confirmed." ;;
-  *) echo "Not confirmed. Please adjust the default (k8-config-default.toml) config to match your adapters and re-run. Exiting."; exit 1;;
-esac 
+echo "Adapters will be auto-detected; confirm the proposed mapping below (override later if needed)."
 
 # Detect correct PWM path
 found=0
@@ -151,6 +142,28 @@ for pwm in "${found_pwms[@]}"; do
   enable_path="$dir/${pwm_name}_enable"
   rpm_path="$dir/fan${pwm_name#pwm}_input"
 
+  hwmon_path="$dir"
+  hwmon_name=""
+  if [ -f "$dir/name" ]; then
+    hwmon_name=$(tr -d '\n' < "$dir/name" 2>/dev/null || echo "")
+  fi
+  device_path=""
+  if [ -e "$dir/device" ]; then
+    device_path=$(readlink -f "$dir/device" 2>/dev/null || echo "")
+  fi
+  enable_attr=""
+  if [ -n "$enable_path" ]; then
+    enable_attr=$(basename "$enable_path")
+  else
+    enable_attr="${pwm_name}_enable"
+  fi
+  rpm_attr=""
+  if [ -n "$rpm_path" ]; then
+    rpm_attr=$(basename "$rpm_path")
+  elif [[ "$pwm_name" == pwm* ]]; then
+    rpm_attr="fan${pwm_name#pwm}_input"
+  fi
+
   prev_enable=""
   if [ -f "$enable_path" ] && [ -r "$enable_path" ]; then
     prev_enable=$(cat "$enable_path" 2>/dev/null || echo "")
@@ -179,18 +192,18 @@ for pwm in "${found_pwms[@]}"; do
     echo "  -> $pwm_name appears non-existent or not working (0 RPM). Skipping."
   else
     # Ask user to classify this fan, wait up to 10s while spinning at max
-      # Keep prompting up to 60s for a valid answer: c/k/q
+      # Keep prompting up to 300s (5 min) for a valid answer: c/k/s/q
       start_ts=$(date +%s)
       answered=0
       while true; do
         now_ts=$(date +%s)
         elapsed=$(( now_ts - start_ts ))
-        if [ $elapsed -ge 60 ]; then
+        if [ $elapsed -ge 300 ]; then
           echo "  -> Timed out for this fan; continuing without assignment."
           break
         fi
-        remain=$(( 60 - elapsed ))
-        echo -n "  -> Identify $pwm_name role: [c]pu / [k]ase / [q]uit (${remain}s left): "
+        remain=$(( 300 - elapsed ))
+        echo -n "  -> Identify $pwm_name role: [c]pu / [k]ase / [s]kip / [q]uit (${remain}s left): "
         if read -r -t "$remain" answer; then
           case "${answer,,}" in
             q|quit)
@@ -207,11 +220,13 @@ for pwm in "${found_pwms[@]}"; do
               ;;
             c|cpu)
               if [ -n "$SELECTED_CPU_PWM" ]; then
-                echo "  -> CPU fan already defined; choose case or quit."
+                echo "  -> CPU fan already defined; choose case, skip, or quit."
                 continue
               fi
               echo "  -> Recorded $pwm_name as CPU fan"
-              printf "%s\t%s\t%s\t%s\t%s\n" "$pwm_name" "cpu" "$pwm" "$enable_path" "$rpm_path" >> "$FANS_MAP_FILE"
+              printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+                "$pwm_name" "cpu" "$pwm" "$enable_path" "$rpm_path" \
+                "$hwmon_path" "$hwmon_name" "$device_path" "$enable_attr" "$rpm_attr" >> "$FANS_MAP_FILE"
               SELECTED_CPU_PWM="$pwm"
               SELECTED_CPU_ENABLE="$enable_path"
               answered=1
@@ -219,12 +234,19 @@ for pwm in "${found_pwms[@]}"; do
               ;;
             k|case)
               echo "  -> Recorded $pwm_name as case fan"
-              printf "%s\t%s\t%s\t%s\t%s\n" "$pwm_name" "case" "$pwm" "$enable_path" "$rpm_path" >> "$FANS_MAP_FILE"
+              printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+                "$pwm_name" "case" "$pwm" "$enable_path" "$rpm_path" \
+                "$hwmon_path" "$hwmon_name" "$device_path" "$enable_attr" "$rpm_attr" >> "$FANS_MAP_FILE"
+              answered=1
+              break
+              ;;
+            s|skip)
+              echo "  -> Skipping $pwm_name (no role assigned)"
               answered=1
               break
               ;;
             *)
-              echo "  -> Invalid choice. Please enter c, k, or q."
+              echo "  -> Invalid choice. Please enter c, k, s, or q."
               ;;
           esac
         else
@@ -286,6 +308,144 @@ OUT_TOML="/etc/k8-fan-controller-config.toml"
 FANS_MAP_FILE="/tmp/fans_map.txt"
 mkdir -p /etc
 
+SENSOR_DETECTION=$(python3 - <<'PY'
+import json
+import subprocess
+
+DEFAULT_WHITELIST = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "nvme-pci-",
+    "acpitz-acpi-",
+    "spd5118-i2c-1-",
+}
+
+DEFAULT_CPU = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+}
+
+DEFAULT_CASE = {
+    "nvme-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "acpitz-acpi-",
+}
+
+ROLE_PATTERNS = {
+    "cpu": ["k10temp", "coretemp", "zenpower", "tctl", "amdgpu", "radeon"],
+    "case": ["nvme", "it86", "acpitz", "pch", "amdgpu", "radeon"],
+}
+
+
+def canonical(name: str) -> str:
+    parts = name.split('-')
+    if len(parts) <= 1:
+        return name
+    last = parts[-1]
+    if len(last) <= 4 and all(c in "0123456789abcdef" for c in last.lower()):
+        return '-'.join(parts[:-1]) + '-'
+    if last.isdigit():
+        return '-'.join(parts[:-1]) + '-'
+    return name
+
+
+used_defaults = False
+try:
+    output = subprocess.check_output(['sensors', '-j'], text=True, timeout=10)
+    data = json.loads(output)
+    adapters = list(data.keys())
+except Exception:
+    adapters = []
+    used_defaults = True
+
+whitelist = set()
+role_map = {role: set() for role in ROLE_PATTERNS.keys()}
+
+for adapter in adapters:
+    canon = canonical(adapter)
+    if canon:
+        whitelist.add(canon)
+    else:
+        whitelist.add(adapter)
+    lower = adapter.lower()
+    for role, patterns in ROLE_PATTERNS.items():
+        if any(p in lower for p in patterns):
+            role_map[role].add(canon or adapter)
+
+if not whitelist:
+    used_defaults = True
+    whitelist = set(DEFAULT_WHITELIST)
+
+summary_lines = []
+if used_defaults:
+    summary_lines.append("NOTE: sensors -j unavailable; using default adapter prefixes.")
+summary_lines.append("Detected sensor adapters to whitelist:")
+sorted_whitelist = sorted(whitelist)
+for name in sorted_whitelist:
+    summary_lines.append(f"  - {name}")
+summary_lines.append("")
+summary_lines.append("Role assignments:")
+for role in sorted(role_map.keys()):
+    entries = sorted(role_map[role])
+    if not entries:
+        entries = sorted(DEFAULT_CPU if role == 'cpu' else DEFAULT_CASE)
+        summary_lines.append(f"  {role}: (defaults) {', '.join(entries)}")
+    else:
+        summary_lines.append(f"  {role}: {', '.join(entries)}")
+
+if not role_map['cpu']:
+    role_map['cpu'].update(DEFAULT_CPU)
+if not role_map['case']:
+    role_map['case'].update(DEFAULT_CASE)
+
+config_lines = []
+if used_defaults:
+    config_lines.append('# sensor_whitelist populated with defaults (auto-detect unavailable)')
+else:
+    config_lines.append('# sensor_whitelist populated automatically from sensors -j')
+config_lines.append('sensor_whitelist = [')
+for idx, name in enumerate(sorted_whitelist):
+    comma = ',' if idx < len(sorted_whitelist) - 1 else ''
+    config_lines.append(f'  "{name}"{comma}')
+config_lines.append(']')
+config_lines.append('')
+config_lines.append('[critical_sensors_by_role]')
+for role in sorted(role_map.keys()):
+    entries = sorted(role_map[role])
+    if not entries:
+        continue
+    config_lines.append(f'{role} = [')
+    for idx, name in enumerate(entries):
+        comma = ',' if idx < len(entries) - 1 else ''
+        config_lines.append(f'  "{name}"{comma}')
+    config_lines.append(']')
+
+print('\n'.join(summary_lines))
+print('__SPLIT__')
+print('\n'.join(config_lines))
+PY
+)
+
+SENSOR_SUMMARY=${SENSOR_DETECTION%%__SPLIT__*}
+SENSOR_CONFIG_TOML=${SENSOR_DETECTION#*__SPLIT__}
+SENSOR_CONFIG_TOML=${SENSOR_CONFIG_TOML#__SPLIT__\n}
+
+echo
+echo "Detected sensor configuration:"
+printf '%s\n' "$SENSOR_SUMMARY"
+echo
+read -r -p "Use these sensor adapters and role assignments? [Y/n]: " SENSOR_ACCEPT
+case "${SENSOR_ACCEPT,,}" in
+  y|yes|"" ) echo "Adapters confirmed." ;;
+  *) echo "Please edit k8-config-default.toml to match your sensors and re-run."; exit 1;;
+esac
+
 {
 cat <<'TOML'
 # K8 Fan Controller Configuration (TOML)
@@ -293,13 +453,13 @@ cat <<'TOML'
 # Edit values and run `k8fc reload` to apply.
 
 # check_interval: seconds between control loop iterations
-check_interval = 5
+check_interval = 1
 
 # averaging_samples: number of recent samples to average per sensor
 averaging_samples = 6
 
 # min_change_interval: seconds to wait between applying speed changes
-min_change_interval = 2
+min_change_interval = 1
 
 # min_speed_change: minimum percent delta before applying changes
 min_speed_change = 3
@@ -328,40 +488,43 @@ curve_min_speed = 20
 # rpm_ignore_floor: skip lowering speed if estimated RPM would drop below this
 rpm_ignore_floor = 800
 
+# Adaptive controller settings
+adaptive_enabled = true
+adaptive_drop_step = 5
+adaptive_raise_step = 15
+adaptive_stable_cycles = 5
+adaptive_temp_window = 1.5
+adaptive_temp_aggressive = 3.0
+
 # cpu_auto: if true, leave CPU fan(s) in motherboard automatic mode
 cpu_auto = false
 
 # roles: roles under control; if absent, inferred from fans[]
 # roles = ["cpu", "case"]
+TOML
 
-# sensor_whitelist: adapters to parse from `sensors -j`
-sensor_whitelist = [
-  "it8613-isa-0a30",        # Super I/O
-  "k10temp-pci-00c3",       # AMD CPU
-  "amdgpu-pci-c600",        # AMD dGPU/iGPU
-  "nvme-pci-0500",          # NVMe
-  "spd5118-i2c-1-50",
-  "spd5118-i2c-1-51",
-]
+printf "%s\n" "$SENSOR_CONFIG_TOML"
 
-# critical_sensors_by_role: select governing adapters per role (fallback: all)
-[critical_sensors_by_role]
-# cpu = ["k10temp-pci-00c3", "amdgpu-pci-c600"]
-# case = ["nvme-pci-0500"]
+cat <<'TOML'
 
 # Fans discovered by installer
 # Add/edit entries as needed
 TOML
 
 if [[ -f "$FANS_MAP_FILE" ]]; then
-  while IFS=$'\t' read -r name role pwm_path enable_path rpm_path; do
+  while IFS=$'\t' read -r name role pwm_path enable_path rpm_path hwmon_path hwmon_name device_path enable_attr rpm_attr; do
     [[ -z "$name" ]] && continue
     echo "[[fans]]"
     echo "name = \"$name\""
     echo "role = \"$role\""
-    echo "pwm_path = \"$pwm_path\""
+    if [[ -n "$pwm_path" ]]; then echo "pwm_path = \"$pwm_path\""; fi
     if [[ -n "$enable_path" ]]; then echo "enable_path = \"$enable_path\""; fi
     if [[ -n "$rpm_path" ]]; then echo "rpm_path = \"$rpm_path\""; fi
+    if [[ -n "$hwmon_path" ]]; then echo "hwmon_path_hint = \"$hwmon_path\""; fi
+    if [[ -n "$hwmon_name" ]]; then echo "hwmon_name = \"$hwmon_name\""; fi
+    if [[ -n "$device_path" ]]; then echo "device_path = \"$device_path\""; fi
+    if [[ -n "$enable_attr" ]]; then echo "enable_attr = \"$enable_attr\""; fi
+    if [[ -n "$rpm_attr" ]]; then echo "rpm_attr = \"$rpm_attr\""; fi
     echo
   done < "$FANS_MAP_FILE"
 fi
@@ -457,19 +620,34 @@ USAGE
       # Restore automatic mode for all fans based on config
       python3 - <<'PY'
 import os
+import sys
 try:
     import tomllib as toml
 except Exception:
     import tomli as toml  # type: ignore
+
+resolve = None
+sys.path.insert(0, '/opt/k8-fan-controller')
+try:
+    from k8_fan_controller.sysfs_utils import resolve_fan_paths  # type: ignore
+    resolve = resolve_fan_paths
+except Exception:
+    resolve = None
+
 cfg_path = '/etc/k8-fan-controller-config.toml'
 try:
-    with open(cfg_path,'rb') as f:
+    with open(cfg_path, 'rb') as f:
         cfg = toml.load(f)
     for fan in cfg.get('fans', []):
+        try:
+            if resolve is not None:
+                resolve(fan)
+        except Exception:
+            pass
         ep = fan.get('enable_path')
         if ep and os.path.exists(ep):
             try:
-                with open(ep,'w') as fw:
+                with open(ep, 'w') as fw:
                     fw.write('2')
             except Exception:
                 pass

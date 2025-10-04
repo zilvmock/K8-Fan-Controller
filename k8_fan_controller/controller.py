@@ -142,7 +142,10 @@ class FanController:
                 self.logger.error("Could not read current fan speeds")
                 return True
 
-            target_speeds = {r: self.policy.calculate_fan_speed(target_temps_by_role[r], current_speeds.get(r, 0)) for r in roles}
+            target_speeds = {
+                r: self.policy.calculate_fan_speed(r, target_temps_by_role[r], current_speeds.get(r, 0))
+                for r in roles
+            }
             current_rpms = self.fan_io.get_current_rpm_by_role(roles)
             target_speeds = self.policy.apply_rpm_floors(target_speeds, current_speeds, current_rpms)
             target_speeds = self.policy.clamp_floor_when_lowering(target_speeds, current_speeds, current_rpms)

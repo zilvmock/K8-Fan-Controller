@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Set
+from typing import Any, Dict
 
 
 class SpeedPolicy:
@@ -13,6 +13,20 @@ class SpeedPolicy:
     def __init__(self, config: Dict, logger):
         self.config = config
         self.logger = logger
+        self.role_state: Dict[str, Dict[str, Any]] = {}
+        self._load_adaptive_settings()
+
+    def _load_adaptive_settings(self):
+        cfg = self.config
+        self.adaptive_enabled = bool(cfg.get('adaptive_enabled', True))
+        self.drop_step = max(1, int(cfg.get('adaptive_drop_step', 5)))
+        self.raise_step = max(1, int(cfg.get('adaptive_raise_step', 15)))
+        self.stable_cycles_required = max(1, int(cfg.get('adaptive_stable_cycles', 5)))
+        self.temp_window = float(cfg.get('adaptive_temp_window', 1.5))
+        self.temp_aggressive = float(cfg.get('adaptive_temp_aggressive', 3.0))
+        self.ramp_start = float(cfg.get('ramp_start', 50))
+        self.max_speed = int(cfg.get('max_fan_speed', 100))
+        self.min_speed = int(cfg.get('curve_min_speed', 20))
 
     def calculate_target_temperature(self, temperatures: Dict[str, float]) -> float:
         """Weighted aggregate used for global reasoning if needed.
@@ -42,19 +56,94 @@ class SpeedPolicy:
             return 0.0
         return max(role_temps.values())
 
-    def calculate_fan_speed(self, target_temp: float, current_speed: int) -> int:
+    def calculate_fan_speed(self, role: str, target_temp: float, current_speed: int | None) -> int:
         """Map role temperature to a raw percent target using configured curve."""
         emergency_temp = self.config["emergency_temp"]
         max_speed = self.config["max_fan_speed"]
         hysteresis = self.config["hysteresis"]
         if target_temp >= emergency_temp:
             return max_speed
-        return self._target_percent(
+        base_target = self._target_percent(
             target_temp=target_temp,
             current_percent=current_speed if current_speed is not None else 0,
             hysteresis=hysteresis,
             max_speed=max_speed,
         )
+        if not self.adaptive_enabled:
+            return base_target
+
+        current_speed = int(current_speed) if current_speed is not None else base_target
+        state = self.role_state.setdefault(
+            role,
+            {
+                'stable_cycles': 0,
+                'last_temp': target_temp,
+                'last_speed': current_speed,
+            },
+        )
+
+        last_temp = state.get('last_temp', target_temp)
+        delta_temp = target_temp - last_temp
+        abs_delta = abs(delta_temp)
+        stable_cycles = state.get('stable_cycles', 0)
+
+        new_speed = base_target
+
+        if base_target < current_speed:
+            # Prefer slow declines; require sustained stability before stepping down.
+            if delta_temp <= 0 or abs_delta <= self.temp_window:
+                stable_cycles = min(stable_cycles + 1, self.stable_cycles_required * 3)
+            else:
+                stable_cycles = 0
+
+            if stable_cycles >= self.stable_cycles_required and target_temp <= self.ramp_start:
+                new_speed = max(current_speed - self.drop_step, base_target)
+                stable_cycles = 0
+                self.logger.debug(
+                    "Adaptive %s drop: %.1f°C, %d%% -> %d%% (base %d%%)",
+                    role,
+                    target_temp,
+                    current_speed,
+                    new_speed,
+                    base_target,
+                )
+            else:
+                new_speed = current_speed
+                self.logger.debug(
+                    "Adaptive %s holding %d%% (base %d%%, stable %d/%d)",
+                    role,
+                    current_speed,
+                    base_target,
+                    stable_cycles,
+                    self.stable_cycles_required,
+                )
+        elif base_target > current_speed:
+            stable_cycles = 0
+            if delta_temp >= self.temp_aggressive or target_temp >= self.ramp_start:
+                new_speed = base_target
+                self.logger.debug(
+                    "Adaptive %s jump: %.1f°C rising (delta %.1f), target %d%%", role, target_temp, delta_temp, base_target
+                )
+            else:
+                new_speed = min(base_target, current_speed + self.raise_step)
+                self.logger.debug(
+                    "Adaptive %s step up %d%% -> %d%% (base %d%%)",
+                    role,
+                    current_speed,
+                    new_speed,
+                    base_target,
+                )
+        else:
+            if abs_delta > self.temp_window:
+                stable_cycles = 0
+            else:
+                stable_cycles = min(stable_cycles + 1, self.stable_cycles_required * 3)
+
+        state['stable_cycles'] = stable_cycles
+        state['last_temp'] = target_temp
+        state['last_speed'] = new_speed
+
+        return int(max(self.min_speed, min(self.max_speed, new_speed)))
 
     def apply_rpm_floors(self, target_speeds: Dict[str, int], current_speeds: Dict[str, int], current_rpms: Dict[str, int]) -> Dict[str, int]:
         """No proactive bump-ups based on RPM floors.

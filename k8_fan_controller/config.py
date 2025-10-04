@@ -9,6 +9,8 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # Python <=3.10
     import tomli as _toml  # type: ignore
 
+from .sysfs_utils import resolve_fan_paths
+
 
 class ConfigManager:
     """Loads and validates controller configuration from TOML file."""
@@ -48,10 +50,32 @@ class ConfigManager:
         if not isinstance(fans, list) or not fans:
             raise ValueError("Config must include non-empty 'fans' list from installer")
 
+        adaptive_defaults = {
+            'adaptive_enabled': True,
+            'adaptive_drop_step': 5,
+            'adaptive_raise_step': 15,
+            'adaptive_stable_cycles': 5,
+            'adaptive_temp_window': 1.5,
+            'adaptive_temp_aggressive': 3.0,
+        }
+        for key, default in adaptive_defaults.items():
+            cfg.setdefault(key, default)
+
+        cfg['adaptive_enabled'] = bool(cfg.get('adaptive_enabled'))
+        cfg['adaptive_drop_step'] = max(1, int(cfg.get('adaptive_drop_step')))
+        cfg['adaptive_raise_step'] = max(1, int(cfg.get('adaptive_raise_step')))
+        cfg['adaptive_stable_cycles'] = max(1, int(cfg.get('adaptive_stable_cycles')))
+        cfg['adaptive_temp_window'] = float(cfg.get('adaptive_temp_window'))
+        cfg['adaptive_temp_aggressive'] = float(cfg.get('adaptive_temp_aggressive'))
+
         for f in fans:
             for k in ["name", "role", "pwm_path"]:
                 if k not in f:
                     raise KeyError(f"Fan entry missing '{k}': {f}")
+            if not resolve_fan_paths(f, logger):
+                raise FileNotFoundError(
+                    f"Unable to resolve PWM path for {f.get('name', f.get('pwm_path', 'unknown'))}"
+                )
             if not Path(f["pwm_path"]).exists():
                 raise FileNotFoundError(f"PWM path not found: {f['pwm_path']}")
             if f.get("enable_path") and not Path(f["enable_path"]).exists():

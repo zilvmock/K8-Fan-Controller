@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional, Set
 
+from .sysfs_utils import resolve_fan_paths
+
 class FanIO:
     """Low-level interaction with sysfs PWM and RPM.
 
@@ -15,6 +17,9 @@ class FanIO:
         self.logger = logger
         self.original_pwm_mode: Optional[Dict[str, str]] = None
         self.last_change_ts = 0.0
+
+        for fan in self.config.get('fans', []):
+            resolve_fan_paths(fan, self.logger)
 
     @staticmethod
     def _percent_to_pwm(percent: int) -> int:
