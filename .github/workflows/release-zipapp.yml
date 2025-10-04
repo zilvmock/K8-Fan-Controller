@@ -1,9 +1,16 @@
 name: Build Release Zipapp
 
+permissions:
+  contents: write
+
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Upload assets to this existing release tag (optional)'
+        required: false
 
 jobs:
   build-zipapp:
@@ -24,7 +31,7 @@ jobs:
 
       - name: Prepare environment
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.release_tag || '' }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           python -m pip install --upgrade pip
@@ -33,6 +40,9 @@ jobs:
             version="${REF_NAME//\//-}"
           fi
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "RELEASE_UPLOAD_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          fi
           mkdir -p dist
 
       - name: Build zipapp bundle
@@ -42,18 +52,38 @@ jobs:
             -o "dist/k8-fan-controller-${RELEASE_VERSION}.pyz"
           cp k8-config-default.toml dist/
 
+      - name: Assemble release archive
+        run: |
+          bundle_dir="dist/release"
+          mkdir -p "$bundle_dir"
+          cp "dist/k8-fan-controller-${RELEASE_VERSION}.pyz" "$bundle_dir/"
+          cp install.sh uninstall.sh k8-config-default.toml "$bundle_dir/"
+          chmod 755 "$bundle_dir"/install.sh "$bundle_dir"/uninstall.sh
+          (
+            cd "$bundle_dir"
+            zip -r "../k8-fan-controller-${RELEASE_VERSION}.zip" \
+              install.sh uninstall.sh k8-config-default.toml \
+              "k8-fan-controller-${RELEASE_VERSION}.pyz"
+          )
+          rm -rf "$bundle_dir"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: k8-fan-controller-${{ env.RELEASE_VERSION }}
           path: dist
 
-      - name: Attach assets to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/k8-fan-controller-${{ env.RELEASE_VERSION }}.pyz
-            dist/k8-config-default.toml
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fail_on_unmatched_files: true
+      - name: Upload assets to release
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TARGET: ${{ env.RELEASE_UPLOAD_TAG }}
+        run: |
+          if [ -z "$RELEASE_TARGET" ]; then
+            echo "Release tag missing; cannot upload assets" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TARGET" \
+            dist/k8-fan-controller-${RELEASE_VERSION}.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

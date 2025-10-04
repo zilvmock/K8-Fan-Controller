@@ -266,22 +266,48 @@ done
 echo
 echo "Installing fan controller package..."
 echo "Creating directories..."
-mkdir -p /opt/k8-fan-controller
+INSTALL_ROOT="/opt/k8-fan-controller"
+rm -rf "$INSTALL_ROOT"
+mkdir -p "$INSTALL_ROOT"
 mkdir -p /var/log
 
-# Install the Python package (module directory)
-echo "Installing package files..."
-if [[ -d "k8_fan_controller" ]]; then
-  rm -rf /opt/k8-fan-controller/k8_fan_controller
-  cp -r k8_fan_controller /opt/k8-fan-controller/
-  # Keep wrapper script for backwards compatibility if present
-  if [[ -f "k8-fan-controller.py" ]]; then
-    cp k8-fan-controller.py /opt/k8-fan-controller/k8-fan-controller.py
-    chmod +x /opt/k8-fan-controller/k8-fan-controller.py
+echo "Locating zipapp bundle..."
+ZIPAPP_SRC=""
+if [[ -f "k8-fan-controller.pyz" ]]; then
+  ZIPAPP_SRC="k8-fan-controller.pyz"
+else
+  shopt -s nullglob
+  mapfile -t _zip_matches < <(printf '%s\n' k8-fan-controller-*.pyz | sort)
+  shopt -u nullglob
+  if [[ ${#_zip_matches[@]} -gt 0 ]]; then
+    last_index=$(( ${#_zip_matches[@]} - 1 ))
+    ZIPAPP_SRC="${_zip_matches[$last_index]}"
+  fi
+fi
+
+TMP_ZIPAPP_DIR=""
+if [[ -z "$ZIPAPP_SRC" ]]; then
+  if [[ -d "k8_fan_controller" ]]; then
+    echo "No prebuilt zipapp found; building from local sources..."
+    TMP_ZIPAPP_DIR=$(mktemp -d)
+    python3 -m zipapp k8_fan_controller \
+      -p "/usr/bin/env python3" \
+      -o "$TMP_ZIPAPP_DIR/k8-fan-controller.pyz"
+    ZIPAPP_SRC="$TMP_ZIPAPP_DIR/k8-fan-controller.pyz"
+  else
+    echo "Error: zipapp bundle not found and source directory 'k8_fan_controller' unavailable"
+    exit 1
   fi
 else
-  echo "Error: package directory 'k8_fan_controller' not found in current directory"
-  exit 1
+  echo "Using existing bundle: $ZIPAPP_SRC"
+fi
+
+echo "Copying bundle to $INSTALL_ROOT..."
+cp "$ZIPAPP_SRC" "$INSTALL_ROOT/k8-fan-controller.pyz"
+chmod 755 "$INSTALL_ROOT/k8-fan-controller.pyz"
+
+if [[ -n "$TMP_ZIPAPP_DIR" ]]; then
+  rm -rf "$TMP_ZIPAPP_DIR"
 fi
 
 # Install systemd service
@@ -293,7 +319,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 -m k8_fan_controller
+ExecStart=/usr/bin/env python3 /opt/k8-fan-controller/k8-fan-controller.pyz
 Restart=on-failure
 RestartSec=5
 WorkingDirectory=/opt/k8-fan-controller
@@ -627,7 +653,7 @@ except Exception:
     import tomli as toml  # type: ignore
 
 resolve = None
-sys.path.insert(0, '/opt/k8-fan-controller')
+sys.path.insert(0, '/opt/k8-fan-controller/k8-fan-controller.pyz')
 try:
     from k8_fan_controller.sysfs_utils import resolve_fan_paths  # type: ignore
     resolve = resolve_fan_paths
@@ -663,7 +689,8 @@ PY
       echo "Service unit: $unit"
       echo "Config:       /etc/k8-fan-controller-config.toml"
       echo "Service file: /etc/systemd/system/$unit"
-      echo "Script dir:   /opt/k8-fan-controller"
+      echo "Install dir:  /opt/k8-fan-controller"
+      echo "Bundle:       /opt/k8-fan-controller/k8-fan-controller.pyz"
       echo "Log file:     /var/log/k8-fan-controller.log"
       echo "Logrotate:    /etc/logrotate.d/k8-fan-controller"
       echo "Helper:       /etc/profile.d/k8fc.sh"
@@ -688,7 +715,7 @@ echo
 echo "The script ran SUCCESSFULLY!"
 echo "Summary:"
 echo "  - Installed packages: python3, lm-sensors, logrotate"
-echo "  - Installed controller package to: /opt/k8-fan-controller/k8_fan_controller"
+echo "  - Installed controller bundle to: /opt/k8-fan-controller/k8-fan-controller.pyz"
 echo "  - Created systemd unit: /etc/systemd/system/$UNIT_NAME"
 echo "  - Generated config: /etc/k8-fan-controller-config.toml"
 echo "  - Log file: /var/log/k8-fan-controller.log"

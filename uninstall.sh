@@ -105,7 +105,7 @@ echo
 echo "Uninstall complete. Summary:"
 echo "  - Services stopped/disabled (if present): $UNIT_A"
 echo "  - Fans set to automatic where possible"
-echo "  - Removed: /opt/k8-fan-controller, /etc/k8-fan-controller-config.toml, service units, logrotate entry, log file, k8fc helper"
+echo "  - Removed: /opt/k8-fan-controller (bundle), /etc/k8-fan-controller-config.toml, service units, logrotate entry, log file, k8fc helper"
 echo "  - Packages removed (if selected): lm-sensors, logrotate, python3-tomli"
 
 exit 0

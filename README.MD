@@ -13,7 +13,20 @@ Lightweight systemd service for the GMKtech K8 Plus mini PC that automatically a
 - Writes PWM via sysfs and restores automatic mode on shutdown.
 
 #### Install (Debian/Ubuntu)
-Run this in a terminal:
+**Preferred: GitHub Release bundle**
+
+```
+TAG=$(curl -sSL https://api.github.com/repos/zilvmock/K8-Fan-Controller/releases/latest \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+curl -LO "https://github.com/zilvmock/K8-Fan-Controller/releases/download/${TAG}/k8-fan-controller-${TAG}.zip"
+unzip -o "k8-fan-controller-${TAG}.zip"
+chmod +x install.sh uninstall.sh
+sudo ./install.sh
+```
+
+The archive contains the controller bundle (`.pyz`), default config, and helper scripts. To install a specific release, set `TAG` manually (for example `TAG=v1.0`).
+
+**Alternative: clone the main branch**
 
 ```
 git clone https://github.com/zilvmock/K8-Fan-Controller.git && \
