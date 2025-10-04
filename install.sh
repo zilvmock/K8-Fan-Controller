@@ -43,47 +43,253 @@ if ! sensors -j > /dev/null 2>&1; then
   exit 1
 fi
 
-# Show and verify detected adapters vs defaults
 echo
-echo "Detected adapters vs default configuration (please verify)"
-echo "Raw 'sensors' output (for reference):"
-echo "==========================================================="
-sensors || true
-echo "==========================================================="
-echo
+echo "IMPORTANT: Adapters in the config must match your system for correct operation."
 
-python3 - <<'PY'
-import json, subprocess
+echo "Scanning sensors to propose adapter groups..."
+
+SENSOR_DETECTION=$(python3 - <<'PY'
+import json
+import subprocess
+
+DEFAULT_WHITELIST = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "nvme-pci-",
+    "acpitz-acpi-",
+    "spd5118-i2c-",
+}
+
+DEFAULT_CPU = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+}
+
+DEFAULT_CASE = {
+    "nvme-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "acpitz-acpi-",
+    "spd5118-i2c-",
+}
+
+ROLE_PATTERNS = {
+    "cpu": ["k10temp", "coretemp", "zenpower", "tctl", "amdgpu", "radeon"],
+    "case": ["nvme", "it86", "acpitz", "pch", "amdgpu", "radeon", "spd"],
+}
+
+
+def canonical(name: str) -> str:
+    parts = name.split('-')
+    if len(parts) <= 1:
+        return name
+    while len(parts) > 1:
+        last = parts[-1]
+        lowered = last.lower()
+        if not last:
+            parts = parts[:-1]
+            continue
+        if last.isdigit() or (len(last) <= 4 and all(c in "0123456789abcdef" for c in lowered)):
+            parts = parts[:-1]
+        else:
+            break
+    if len(parts) == 1:
+        return parts[0]
+    return '-'.join(parts) + '-'
+
+
+used_defaults = False
+try:
+    output = subprocess.check_output(['sensors', '-j'], text=True, timeout=10)
+    data = json.loads(output)
+    adapters = list(data.keys())
+except Exception:
+    adapters = []
+    used_defaults = True
+
+whitelist = set()
+role_map = {role: set() for role in ROLE_PATTERNS.keys()}
+
+for adapter in adapters:
+    canon = canonical(adapter)
+    if canon:
+        whitelist.add(canon)
+    else:
+        whitelist.add(adapter)
+    lower = adapter.lower()
+    for role, patterns in ROLE_PATTERNS.items():
+        if any(p in lower for p in patterns):
+            role_map[role].add(canon or adapter)
+
+if not whitelist:
+    used_defaults = True
+    whitelist = set(DEFAULT_WHITELIST)
+
+summary_lines = []
+raw_adapters = sorted(adapters)
+summary_lines.append("System adapters (raw from sensors -j):")
+if raw_adapters:
+    for name in raw_adapters:
+        summary_lines.append(f"  - {name}")
+else:
+    summary_lines.append("  (none detected)")
+summary_lines.append("")
+sorted_whitelist = sorted(whitelist)
+summary_lines.append("Proposed adapter prefixes to whitelist:")
+if used_defaults:
+    summary_lines.append("  (using defaults; sensors -j unavailable)")
+for name in sorted_whitelist:
+    summary_lines.append(f"  - {name}")
+summary_lines.append("")
+summary_lines.append("Role assignments (prefixes):")
+for role in sorted(role_map.keys()):
+    entries = sorted(role_map[role])
+    if not entries:
+        entries = sorted(DEFAULT_CPU if role == 'cpu' else DEFAULT_CASE)
+        summary_lines.append(f"  {role}: (defaults) {', '.join(entries)}")
+    else:
+        summary_lines.append(f"  {role}: {', '.join(entries)}")
+
+if not role_map['cpu']:
+    role_map['cpu'].update(DEFAULT_CPU)
+if not role_map['case']:
+    role_map['case'].update(DEFAULT_CASE)
+
+config_lines = []
+if used_defaults:
+    config_lines.append('# sensor_whitelist populated with defaults (auto-detect unavailable)')
+else:
+    config_lines.append('# sensor_whitelist populated automatically from sensors -j')
+config_lines.append('sensor_whitelist = [')
+for idx, name in enumerate(sorted_whitelist):
+    comma = ',' if idx < len(sorted_whitelist) - 1 else ''
+    config_lines.append(f'  "{name}"{comma}')
+config_lines.append(']')
+config_lines.append('')
+config_lines.append('[critical_sensors_by_role]')
+for role in sorted(role_map.keys()):
+    entries = sorted(role_map[role])
+    if not entries:
+        continue
+    config_lines.append(f'{role} = [')
+    for idx, name in enumerate(entries):
+        comma = ',' if idx < len(entries) - 1 else ''
+        config_lines.append(f'  "{name}"{comma}')
+    config_lines.append(']')
+
+print('\n'.join(summary_lines))
+print('__SPLIT__')
+print('\n'.join(config_lines))
+PY
+)
+
+SENSOR_SUMMARY=${SENSOR_DETECTION%%__SPLIT__*}
+SENSOR_CONFIG_TOML=${SENSOR_DETECTION#*__SPLIT__}
+SENSOR_CONFIG_TOML=${SENSOR_CONFIG_TOML#__SPLIT__\n}
+
+echo
+echo "Detected sensor configuration:"
+printf '%s\n' "$SENSOR_SUMMARY"
+echo
+read -r -p "Use these sensor adapters and role assignments? [Y/n]: " SENSOR_ACCEPT
+case "${SENSOR_ACCEPT,,}" in
+  y|yes|"" ) echo "Adapters confirmed." ;;
+  *)
+    read -r -p "Have you already updated k8-config-default.toml with the correct adapters? [y/N]: " SENSOR_DEFAULT_OK
+    case "${SENSOR_DEFAULT_OK,,}" in
+      y|yes)
+        echo "Using adapters from k8-config-default.toml."
+        SENSOR_CONFIG_TOML=$(python3 - <<'PY'
+import json
+import subprocess
 try:
     import tomllib as toml
 except Exception:
     import tomli as toml  # type: ignore
-try:
-    out = subprocess.check_output(['sensors','-j'], text=True)
-    data = json.loads(out)
-    print("SYSTEM adapters")
-    for k in sorted(data.keys()):
-        print(f"   - {k}")
-except Exception as e:
-    print(f"   (error reading sensors -j: {e})")
-print("\n")
-print("DEFAULT adapters (from k8-config-default.toml):")
-try:
-    with open('k8-config-default.toml','rb') as f:
-        cfg = toml.load(f)
-    default = set(cfg.get('sensor_whitelist', []) or [])
-    csr = cfg.get('critical_sensors_by_role', {}) or {}
-    for lst in csr.values():
-        default.update(lst or [])
-    for k in sorted(default):
-        print(f"   - {k}")
-except Exception as e:
-    print(f"   (error reading default config: {e})")
-PY
 
-echo
-echo "IMPORTANT: Adapters in the config must match your system for correct operation."
-echo "Adapters will be auto-detected; confirm the proposed mapping below (override later if needed)."
+DEFAULT_WHITELIST = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "nvme-pci-",
+    "acpitz-acpi-",
+    "spd5118-i2c-",
+}
+
+DEFAULT_CPU = {
+    "k10temp-pci-",
+    "coretemp-isa-",
+    "zenpower-pci-",
+    "amdgpu-pci-",
+}
+
+DEFAULT_CASE = {
+    "nvme-pci-",
+    "amdgpu-pci-",
+    "it8613-isa-",
+    "acpitz-acpi-",
+    "spd5118-i2c-",
+}
+
+def load_defaults():
+    try:
+        with open('k8-config-default.toml', 'rb') as f:
+            cfg = toml.load(f)
+    except Exception:
+        cfg = {}
+    whitelist = cfg.get('sensor_whitelist') or []
+    roles = cfg.get('critical_sensors_by_role') or {}
+    if not whitelist:
+        whitelist = sorted(DEFAULT_WHITELIST)
+    blocks = []
+    blocks.append('sensor_whitelist = [')
+    for idx, name in enumerate(whitelist):
+        comma = ',' if idx < len(whitelist) - 1 else ''
+        blocks.append(f'  "{name}"{comma}')
+    blocks.append(']')
+    blocks.append('')
+    blocks.append('[critical_sensors_by_role]')
+    if roles:
+        for role in sorted(roles.keys()):
+            entries = roles[role] or []
+            blocks.append(f'{role} = [')
+            for idx, name in enumerate(entries):
+                comma = ',' if idx < len(entries) - 1 else ''
+                blocks.append(f'  "{name}"{comma}')
+            blocks.append(']')
+    else:
+        blocks.append('cpu = [')
+        defaults = sorted(DEFAULT_CPU)
+        for idx, name in enumerate(defaults):
+            comma = ',' if idx < len(defaults) - 1 else ''
+            blocks.append(f'  "{name}"{comma}')
+        blocks.append(']')
+        blocks.append('case = [')
+        defaults = sorted(DEFAULT_CASE)
+        for idx, name in enumerate(defaults):
+            comma = ',' if idx < len(defaults) - 1 else ''
+            blocks.append(f'  "{name}"{comma}')
+        blocks.append(']')
+    print('\n'.join(blocks))
+
+load_defaults()
+PY
+        )
+        ;;
+      *)
+        echo "Please edit k8-config-default.toml to match your sensors and re-run."
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 
 # Detect correct PWM path
 found=0
@@ -333,144 +539,6 @@ echo "Creating configuration file: /etc/k8-fan-controller-config.toml"
 OUT_TOML="/etc/k8-fan-controller-config.toml"
 FANS_MAP_FILE="/tmp/fans_map.txt"
 mkdir -p /etc
-
-SENSOR_DETECTION=$(python3 - <<'PY'
-import json
-import subprocess
-
-DEFAULT_WHITELIST = {
-    "k10temp-pci-",
-    "coretemp-isa-",
-    "zenpower-pci-",
-    "amdgpu-pci-",
-    "it8613-isa-",
-    "nvme-pci-",
-    "acpitz-acpi-",
-    "spd5118-i2c-1-",
-}
-
-DEFAULT_CPU = {
-    "k10temp-pci-",
-    "coretemp-isa-",
-    "zenpower-pci-",
-    "amdgpu-pci-",
-}
-
-DEFAULT_CASE = {
-    "nvme-pci-",
-    "amdgpu-pci-",
-    "it8613-isa-",
-    "acpitz-acpi-",
-}
-
-ROLE_PATTERNS = {
-    "cpu": ["k10temp", "coretemp", "zenpower", "tctl", "amdgpu", "radeon"],
-    "case": ["nvme", "it86", "acpitz", "pch", "amdgpu", "radeon"],
-}
-
-
-def canonical(name: str) -> str:
-    parts = name.split('-')
-    if len(parts) <= 1:
-        return name
-    last = parts[-1]
-    if len(last) <= 4 and all(c in "0123456789abcdef" for c in last.lower()):
-        return '-'.join(parts[:-1]) + '-'
-    if last.isdigit():
-        return '-'.join(parts[:-1]) + '-'
-    return name
-
-
-used_defaults = False
-try:
-    output = subprocess.check_output(['sensors', '-j'], text=True, timeout=10)
-    data = json.loads(output)
-    adapters = list(data.keys())
-except Exception:
-    adapters = []
-    used_defaults = True
-
-whitelist = set()
-role_map = {role: set() for role in ROLE_PATTERNS.keys()}
-
-for adapter in adapters:
-    canon = canonical(adapter)
-    if canon:
-        whitelist.add(canon)
-    else:
-        whitelist.add(adapter)
-    lower = adapter.lower()
-    for role, patterns in ROLE_PATTERNS.items():
-        if any(p in lower for p in patterns):
-            role_map[role].add(canon or adapter)
-
-if not whitelist:
-    used_defaults = True
-    whitelist = set(DEFAULT_WHITELIST)
-
-summary_lines = []
-if used_defaults:
-    summary_lines.append("NOTE: sensors -j unavailable; using default adapter prefixes.")
-summary_lines.append("Detected sensor adapters to whitelist:")
-sorted_whitelist = sorted(whitelist)
-for name in sorted_whitelist:
-    summary_lines.append(f"  - {name}")
-summary_lines.append("")
-summary_lines.append("Role assignments:")
-for role in sorted(role_map.keys()):
-    entries = sorted(role_map[role])
-    if not entries:
-        entries = sorted(DEFAULT_CPU if role == 'cpu' else DEFAULT_CASE)
-        summary_lines.append(f"  {role}: (defaults) {', '.join(entries)}")
-    else:
-        summary_lines.append(f"  {role}: {', '.join(entries)}")
-
-if not role_map['cpu']:
-    role_map['cpu'].update(DEFAULT_CPU)
-if not role_map['case']:
-    role_map['case'].update(DEFAULT_CASE)
-
-config_lines = []
-if used_defaults:
-    config_lines.append('# sensor_whitelist populated with defaults (auto-detect unavailable)')
-else:
-    config_lines.append('# sensor_whitelist populated automatically from sensors -j')
-config_lines.append('sensor_whitelist = [')
-for idx, name in enumerate(sorted_whitelist):
-    comma = ',' if idx < len(sorted_whitelist) - 1 else ''
-    config_lines.append(f'  "{name}"{comma}')
-config_lines.append(']')
-config_lines.append('')
-config_lines.append('[critical_sensors_by_role]')
-for role in sorted(role_map.keys()):
-    entries = sorted(role_map[role])
-    if not entries:
-        continue
-    config_lines.append(f'{role} = [')
-    for idx, name in enumerate(entries):
-        comma = ',' if idx < len(entries) - 1 else ''
-        config_lines.append(f'  "{name}"{comma}')
-    config_lines.append(']')
-
-print('\n'.join(summary_lines))
-print('__SPLIT__')
-print('\n'.join(config_lines))
-PY
-)
-
-SENSOR_SUMMARY=${SENSOR_DETECTION%%__SPLIT__*}
-SENSOR_CONFIG_TOML=${SENSOR_DETECTION#*__SPLIT__}
-SENSOR_CONFIG_TOML=${SENSOR_CONFIG_TOML#__SPLIT__\n}
-
-echo
-echo "Detected sensor configuration:"
-printf '%s\n' "$SENSOR_SUMMARY"
-echo
-read -r -p "Use these sensor adapters and role assignments? [Y/n]: " SENSOR_ACCEPT
-case "${SENSOR_ACCEPT,,}" in
-  y|yes|"" ) echo "Adapters confirmed." ;;
-  *) echo "Please edit k8-config-default.toml to match your sensors and re-run."; exit 1;;
-esac
 
 {
 cat <<'TOML'

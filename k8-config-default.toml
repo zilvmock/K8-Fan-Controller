@@ -56,20 +56,20 @@ cpu_auto = false
 # sensor_whitelist: adapters to parse from `sensors -j`
 # (Installer auto-detects actual adapter names and will write them here.)
 sensor_whitelist = [
-  "it8613-isa-",        # Super I/O / board sensors
+  "it8613-isa-",        # Super I/O / board sensors (prefix, may vary)
   "k10temp-pci-",       # AMD CPU package
   "coretemp-isa-",      # Intel CPU fallback
   "zenpower-pci-",      # Alternate AMD CPU driver
   "amdgpu-pci-",        # AMD GPU/iGPU
   "nvme-pci-",          # NVMe drive
   "acpitz-acpi-",       # ACPI thermal zones
-  "spd5118-i2c-1-",     # Memory DIMM sensors
+  "spd5118-i2c-",       # Memory DIMM sensors
 ]
 
 # critical_sensors_by_role: select governing adapters per role (fallback: all)
 [critical_sensors_by_role]
 cpu = ["k10temp-pci-", "coretemp-isa-", "zenpower-pci-", "amdgpu-pci-"]
-case = ["nvme-pci-", "amdgpu-pci-", "it8613-isa-", "acpitz-acpi-"]
+case = ["nvme-pci-", "it8613-isa-", "acpitz-acpi-", "spd5118-i2c-", "amdgpu-pci-"]
 
 # Fans (installer populates these based on your hardware)
 # [[fans]]
