@@ -1,27 +1,46 @@
 from __future__ import annotations
 
-import time
-from typing import Dict, List, Tuple
+from collections import deque
+from typing import Deque, Dict
 
 
 class TemperatureHistory:
     """Maintains a sliding window of recent temperature snapshots."""
+
     def __init__(self, max_samples: int):
-        self.max_samples = int(max_samples)
-        self._history: List[Tuple[float, Dict[str, float]]] = []
+        self.max_samples = max(1, int(max_samples))
+        self._samples: Dict[str, Deque[float]] = {}
+        self._last_seen: Dict[str, int] = {}
+        self._cycle = 0
 
     def update(self, temperatures: Dict[str, float]):
         """Append current readings and trim to the configured window size."""
-        self._history.append((time.time(), dict(temperatures)))
-        if len(self._history) > self.max_samples:
-            self._history = self._history[-self.max_samples:]
+        if not temperatures:
+            return
+
+        self._cycle += 1
+        maxlen = self.max_samples
+        for sensor, value in temperatures.items():
+            series = self._samples.get(sensor)
+            if series is None or series.maxlen != maxlen:
+                series = deque(series or (), maxlen=maxlen)
+                self._samples[sensor] = series
+            series.append(float(value))
+            self._last_seen[sensor] = self._cycle
+
+        # Drop sensors that have not reported for a full window
+        stale_cutoff = self._cycle - maxlen
+        for sensor in list(self._samples.keys()):
+            if self._last_seen.get(sensor, 0) <= stale_cutoff:
+                self._samples.pop(sensor, None)
+                self._last_seen.pop(sensor, None)
 
     def averaged(self) -> Dict[str, float]:
         """Return per-sensor averages across the window to smooth noise."""
-        if not self._history:
+        if not self._samples:
             return {}
-        sensor_readings: Dict[str, List[float]] = {}
-        for _, temps in self._history:
-            for sensor, temp in temps.items():
-                sensor_readings.setdefault(sensor, []).append(temp)
-        return {k: sum(v) / len(v) for k, v in sensor_readings.items() if v}
+        return {
+            sensor: sum(values) / len(values)
+            for sensor, values in self._samples.items()
+            if values
+        }

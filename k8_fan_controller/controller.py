@@ -53,11 +53,17 @@ class FanController:
         # Subsystems (constructed if not injected)
         self.fan_io = fan_io or FanIO(self.config, self.logger)
         self.sensors = sensors or SensorsReader(self.config, self.logger)
-        self.temp_history = temp_history or TemperatureHistory(self.config["averaging_samples"]) 
+        self.temp_history = temp_history or TemperatureHistory(self.config["averaging_samples"])
         self.policy = policy or SpeedPolicy(self.config, self.logger)
         self.safety = safety or SafetyManager(self.config, self.fan_io, self.logger)
 
         # State
+        self.roles = tuple(self._roles_to_control())
+        self._roles_set = set(self.roles)
+        self.min_speed_change = int(self.config.get('min_speed_change', 3))
+        self.min_change_interval = float(self.config["min_change_interval"])
+        self.check_interval = float(self.config["check_interval"])
+        self._clock = time.monotonic
         self.consecutive_failures = 0
         self.max_failures = 3
         self.emergency_shutdown = False
@@ -106,8 +112,8 @@ class FanController:
         or too many consecutive failures).
         """
         try:
-            sensors_data = self.sensors.get_sensors_json()
-            if sensors_data is None:
+            temps = self.sensors.read_temperatures()
+            if temps is None:
                 self.consecutive_failures += 1
                 self.logger.error(f"Failed to get sensor data (failure {self.consecutive_failures}/{self.max_failures})")
                 if self.consecutive_failures >= self.max_failures:
@@ -115,8 +121,6 @@ class FanController:
                     self.fan_io.restore_automatic_mode()
                     return False
                 return True
-
-            temps = self.sensors.extract_temperatures(sensors_data)
             if not self.sensors.validate_temperatures(temps):
                 self.consecutive_failures += 1
                 self.logger.error(f"Invalid temperature data (failure {self.consecutive_failures}/{self.max_failures})")
@@ -130,8 +134,11 @@ class FanController:
             self.consecutive_failures = 0
             self.temp_history.update(temps)
             avg_temps = self.temp_history.averaged()
-            roles = set(self._roles_to_control())
-            target_temps_by_role = {r: self.policy.target_temp_for_role(r, avg_temps, self.sensors) for r in roles}
+            roles = self._roles_set
+            target_temps_by_role = {
+                role: self.policy.target_temp_for_role(role, avg_temps, self.sensors)
+                for role in roles
+            }
             max_temp = max(temps.values())
 
             if self.safety.handle_critical_temperature(max_temp):
@@ -152,20 +159,33 @@ class FanController:
             smooth_targets = self.policy.smooth_targets(target_speeds, current_speeds)
 
             # Log compact summary for observability
-            sensor_count = len(temps)
-            rpms = current_rpms
-            self.logger.info(
-                f"Sensors: {sensor_count}, Max: {max_temp:.1f}°C, Targets: " +
-                ", ".join([f"{r}={target_temps_by_role[r]:.1f}°C" for r in sorted(target_temps_by_role.keys())]) +
-                "; Speeds: " +
-                ", ".join([f"{r}={current_speeds.get(r,0)}%->{smooth_targets.get(r,0)}%" for r in sorted(smooth_targets.keys())]) +
-                ("; RPMs: " + ", ".join([f"{r}={rpms[r]}" for r in sorted(rpms.keys())]) if rpms else "")
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                rpms = current_rpms
+                target_summary = ", ".join(
+                    f"{role}={target_temps_by_role[role]:.1f}°C" for role in sorted(target_temps_by_role)
+                )
+                speed_summary = ", ".join(
+                    f"{role}={current_speeds.get(role, 0)}%->{smooth_targets.get(role, 0)}%"
+                    for role in sorted(smooth_targets)
+                )
+                rpm_summary = ""
+                if rpms:
+                    rpm_summary = "; RPMs: " + ", ".join(
+                        f"{role}={rpms[role]}" for role in sorted(rpms)
+                    )
+                self.logger.info(
+                    "Sensors: %d, Max: %.1f°C, Targets: %s; Speeds: %s%s",
+                    len(temps),
+                    max_temp,
+                    target_summary,
+                    speed_summary,
+                    rpm_summary,
+                )
 
             # Apply changes if deltas exceed threshold and interval elapsed
-            min_change = int(self.config.get('min_speed_change', 3))
-            if any(abs(smooth_targets.get(r,0) - current_speeds.get(r,0)) >= min_change for r in smooth_targets.keys()):
-                if time.time() - self.fan_io.last_change_ts < self.config["min_change_interval"]:
+            min_change = self.min_speed_change
+            if any(abs(smooth_targets.get(r, 0) - current_speeds.get(r, 0)) >= min_change for r in smooth_targets.keys()):
+                if self._clock() - self.fan_io.last_change_ts < self.min_change_interval:
                     return True
                 if self.fan_io.set_fan_speeds_by_role(smooth_targets, roles):
                     self.last_target_speeds_by_role = dict(smooth_targets)
@@ -195,7 +215,7 @@ class FanController:
                 if not self.run_cycle():
                     self.logger.info("Exiting due to critical failure")
                     break
-                time.sleep(self.config["check_interval"])
+                time.sleep(self.check_interval)
 
         except KeyboardInterrupt:
             self.logger.info("Fan controller stopped by user")

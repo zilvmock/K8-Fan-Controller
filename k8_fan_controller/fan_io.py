@@ -16,7 +16,8 @@ class FanIO:
         self.config = config
         self.logger = logger
         self.original_pwm_mode: Optional[Dict[str, str]] = None
-        self.last_change_ts = 0.0
+        self.last_change_ts = float('-inf')
+        self._clock = time.monotonic
 
         for fan in self.config.get('fans', []):
             resolve_fan_paths(fan, self.logger)
@@ -139,5 +140,5 @@ class FanIO:
                 self.logger.error(f"Failed setting {fan['name']} ({role}) to {pct}%: {e}")
                 ok = False
         if ok:
-            self.last_change_ts = time.time()
+            self.last_change_ts = self._clock()
         return ok

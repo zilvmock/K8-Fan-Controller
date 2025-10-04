@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 
 class SensorsReader:
@@ -10,55 +10,89 @@ class SensorsReader:
     def __init__(self, config: Dict, logger):
         self.config = config
         self.logger = logger
+        whitelist = config.get("sensor_whitelist", ()) or ()
+        self._adapter_whitelist: Tuple[str, ...] = tuple(whitelist)
+        self._temp_keys: Tuple[str, ...] = ("temp1_input", "temp2_input", "temp3_input")
 
     def get_sensors_json(self) -> Optional[Dict]:
         """Run `sensors -j` and parse JSON, handling common failures."""
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ['sensors', '-j'],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=True,
-                timeout=10
             )
-            if result.returncode != 0:
-                self.logger.error(f"sensors command failed with code {result.returncode}")
-                return None
-            return json.loads(result.stdout)
+        except FileNotFoundError:
+            self.logger.error("sensors command not found")
+            return None
+        except Exception as exc:
+            self.logger.error(f"Failed to start sensors command: {exc}")
+            return None
+
+        data: Optional[Dict] = None
+        try:
+            assert proc.stdout is not None
+            data = json.load(proc.stdout)
+        except json.JSONDecodeError as exc:
+            self.logger.error(f"Failed to parse sensors JSON output: {exc}")
+        except Exception as exc:
+            self.logger.error(f"Unexpected error reading sensors output: {exc}")
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
+
+        stderr_output = ""
+        try:
+            returncode = proc.wait(timeout=10)
+            if proc.stderr:
+                stderr_output = proc.stderr.read()
         except subprocess.TimeoutExpired:
+            proc.kill()
             self.logger.error("sensors command timed out")
             return None
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"sensors command failed: {e}")
+        finally:
+            if proc.stderr:
+                proc.stderr.close()
+
+        if returncode != 0:
+            detail = f": {stderr_output.strip()}" if stderr_output else ""
+            self.logger.error(f"sensors command failed with code {returncode}{detail}")
             return None
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse sensors JSON output: {e}")
+
+        return data
+
+    def read_temperatures(self) -> Optional[Dict[str, float]]:
+        sensors_data = self.get_sensors_json()
+        if sensors_data is None:
             return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error getting sensor data: {e}")
-            return None
+        return self.extract_temperatures(sensors_data)
 
     def extract_temperatures(self, sensors_data: Dict) -> Dict[str, float]:
         """Extract a flat mapping of sensor name -> temperature (°C)."""
         temperatures: Dict[str, float] = {}
         if not sensors_data:
             return temperatures
+        whitelist = self._adapter_whitelist
+        temp_keys: Iterable[str] = self._temp_keys
         try:
             for adapter_name, adapter_data in sensors_data.items():
-                if not any(allowed in adapter_name for allowed in self.config["sensor_whitelist"]):
+                if whitelist and not any(token in adapter_name for token in whitelist):
                     continue
                 if not isinstance(adapter_data, dict):
                     continue
                 for sensor_name, sensor_data in adapter_data.items():
                     if not isinstance(sensor_data, dict):
                         continue
-                    if any(temp_key in sensor_data for temp_key in ['temp1_input', 'temp2_input', 'temp3_input']):
-                        for temp_key in ['temp1_input', 'temp2_input', 'temp3_input']:
-                            if temp_key in sensor_data:
-                                temp_value = sensor_data[temp_key]
-                                if isinstance(temp_value, (int, float)) and temp_value > 0:
-                                    full_sensor_name = f"{adapter_name}:{sensor_name}:{temp_key}"
-                                    temperatures[full_sensor_name] = float(temp_value)
+                    recorded = False
+                    for temp_key in temp_keys:
+                        temp_value = sensor_data.get(temp_key)
+                        if isinstance(temp_value, (int, float)) and temp_value > 0:
+                            full_sensor_name = f"{adapter_name}:{sensor_name}:{temp_key}"
+                            temperatures[full_sensor_name] = float(temp_value)
+                            recorded = True
+                    if recorded:
+                        continue
                     elif 'Tctl' in sensor_name and isinstance(sensor_data, (int, float)):
                         if sensor_data > 0:
                             full_sensor_name = f"{adapter_name}:Tctl"
