@@ -1,0 +1,100 @@
+name: CI Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: '3.11'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Compile package modules
+        run: python -m compileall -f k8_fan_controller
+
+      - name: Import package modules
+        run: |
+          python - <<'PY'
+          import importlib
+          import pkgutil
+          import traceback
+
+          pkg_name = 'k8_fan_controller'
+          package = importlib.import_module(pkg_name)
+          failures = []
+
+          for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + '.'):
+              try:
+                  importlib.import_module(module_info.name)
+              except Exception as exc:
+                  failures.append((module_info.name, exc, traceback.format_exc()))
+
+          if failures:
+              for name, exc, tb in failures:
+                  print(f"Failed to import {name}: {exc}")
+                  print(tb)
+              raise SystemExit(f"{len(failures)} module imports failed")
+          PY
+
+      - name: Build installer-style zipapp bundle
+        run: |
+          set -euo pipefail
+          TMP_ZIP_DIR=$(mktemp -d)
+          TMP_BUILD_DIR=$(mktemp -d)
+          cp -a k8_fan_controller "$TMP_BUILD_DIR/"
+          find "$TMP_BUILD_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} +
+          cat <<'PY' > "$TMP_BUILD_DIR/__main__.py"
+          from k8_fan_controller.__main__ import main
+
+          if __name__ == "__main__":
+              main()
+          PY
+          python -m zipapp "$TMP_BUILD_DIR" \
+            -p "/usr/bin/env python3" \
+            -o "$TMP_ZIP_DIR/k8-fan-controller-test.pyz"
+          mv "$TMP_ZIP_DIR/k8-fan-controller-test.pyz" k8-fan-controller-test.pyz
+          rm -rf "$TMP_ZIP_DIR" "$TMP_BUILD_DIR"
+
+      - name: Verify zipapp importability
+        run: |
+          python - <<'PY'
+          import sys
+          import zipfile
+
+          path = 'k8-fan-controller-test.pyz'
+
+          with zipfile.ZipFile(path) as zf:
+              names = set(zf.namelist())
+
+          required = {
+              'k8_fan_controller/__init__.py',
+              'k8_fan_controller/__main__.py',
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"Zipapp missing required files: {', '.join(missing)}")
+
+          sys.path.insert(0, path)
+          sys.path = [p for idx, p in enumerate(sys.path) if idx == 0 or p not in ('', '.')]
+
+          main_mod = __import__('k8_fan_controller.__main__', fromlist=['_'])
+          ctrl_mod = __import__('k8_fan_controller.controller', fromlist=['_'])
+
+          if not main_mod.__file__.startswith(path) or not ctrl_mod.__file__.startswith(path):
+              raise SystemExit('Modules were not imported from the bundled zipapp')
+          PY
+
+      - name: Clean up artifacts
+        if: always()
+        run: rm -f k8-fan-controller-test.pyz
