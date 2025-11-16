@@ -68,6 +68,26 @@ class ConfigManager:
         cfg['adaptive_temp_window'] = float(cfg.get('adaptive_temp_window'))
         cfg['adaptive_temp_aggressive'] = float(cfg.get('adaptive_temp_aggressive'))
 
+        oscillation_defaults = {
+            'anti_oscillation_enabled': True,
+            'anti_oscillation_window_seconds': 45.0,
+            'anti_oscillation_hold_seconds': 30.0,
+            'anti_oscillation_speed_delta': 8,
+            'anti_oscillation_required_flips': 2,
+        }
+        for key, default in oscillation_defaults.items():
+            cfg.setdefault(key, default)
+
+        ceiling_default = float(cfg.get('ramp_start', 50.0)) + float(cfg.get('ramp_range', 15.0))
+        cfg.setdefault('anti_oscillation_temp_ceiling', ceiling_default)
+
+        cfg['anti_oscillation_enabled'] = bool(cfg.get('anti_oscillation_enabled'))
+        cfg['anti_oscillation_window_seconds'] = float(cfg.get('anti_oscillation_window_seconds'))
+        cfg['anti_oscillation_hold_seconds'] = float(cfg.get('anti_oscillation_hold_seconds'))
+        cfg['anti_oscillation_speed_delta'] = max(1, int(cfg.get('anti_oscillation_speed_delta')))
+        cfg['anti_oscillation_required_flips'] = max(1, int(cfg.get('anti_oscillation_required_flips')))
+        cfg['anti_oscillation_temp_ceiling'] = float(cfg.get('anti_oscillation_temp_ceiling'))
+
         for f in fans:
             for k in ["name", "role", "pwm_path"]:
                 if k not in f:

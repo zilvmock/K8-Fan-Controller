@@ -47,6 +47,15 @@ adaptive_stable_cycles = 5
 adaptive_temp_window = 1.5
 adaptive_temp_aggressive = 3.0
 
+# Anti-oscillation guard (prevents fan hunting on light/medium activity)
+anti_oscillation_enabled = true
+anti_oscillation_window_seconds = 45
+anti_oscillation_hold_seconds = 30
+anti_oscillation_speed_delta = 8
+anti_oscillation_required_flips = 2
+# Ceiling to allow the guard to engage; defaults to ramp_start + ramp_range (50+15)
+anti_oscillation_temp_ceiling = 65
+
 # cpu_auto: if true, leave CPU fan(s) in motherboard automatic mode
 cpu_auto = false
 

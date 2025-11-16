@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+import statistics
+import time
+from collections import deque
+from typing import Any, Deque, Dict
 
 
 class SpeedPolicy:
@@ -25,8 +28,17 @@ class SpeedPolicy:
         self.temp_window = float(cfg.get('adaptive_temp_window', 1.5))
         self.temp_aggressive = float(cfg.get('adaptive_temp_aggressive', 3.0))
         self.ramp_start = float(cfg.get('ramp_start', 50))
+        self.ramp_range = float(cfg.get('ramp_range', 15))
         self.max_speed = int(cfg.get('max_fan_speed', 100))
         self.min_speed = int(cfg.get('curve_min_speed', 20))
+        # Anti-oscillation guard to avoid hunting during low/medium activity
+        self.anti_oscillation_enabled = bool(cfg.get('anti_oscillation_enabled', True))
+        self.oscillation_window_seconds = float(cfg.get('anti_oscillation_window_seconds', 45))
+        self.oscillation_hold_seconds = float(cfg.get('anti_oscillation_hold_seconds', 30))
+        self.oscillation_speed_delta = max(1, int(cfg.get('anti_oscillation_speed_delta', 8)))
+        self.oscillation_required_flips = max(1, int(cfg.get('anti_oscillation_required_flips', 2)))
+        ceiling_default = self.ramp_start + self.ramp_range
+        self.oscillation_temp_ceiling = float(cfg.get('anti_oscillation_temp_ceiling', ceiling_default))
 
     def calculate_target_temperature(self, temperatures: Dict[str, float]) -> float:
         """Weighted aggregate used for global reasoning if needed.
@@ -79,8 +91,14 @@ class SpeedPolicy:
                 'stable_cycles': 0,
                 'last_temp': target_temp,
                 'last_speed': current_speed,
+                'osc_history': deque(),
+                'osc_hold_until': 0.0,
+                'osc_hold_speed': None,
             },
         )
+        state.setdefault('osc_history', deque())
+        state.setdefault('osc_hold_until', 0.0)
+        state.setdefault('osc_hold_speed', None)
 
         last_temp = state.get('last_temp', target_temp)
         delta_temp = target_temp - last_temp
@@ -141,9 +159,10 @@ class SpeedPolicy:
 
         state['stable_cycles'] = stable_cycles
         state['last_temp'] = target_temp
-        state['last_speed'] = new_speed
+        guarded = self._apply_oscillation_guard(role, new_speed, target_temp, state)
+        state['last_speed'] = guarded
 
-        return int(max(self.min_speed, min(self.max_speed, new_speed)))
+        return int(max(self.min_speed, min(self.max_speed, guarded)))
 
     def apply_rpm_floors(self, target_speeds: Dict[str, int], current_speeds: Dict[str, int], current_rpms: Dict[str, int]) -> Dict[str, int]:
         """No proactive bump-ups based on RPM floors.
@@ -188,6 +207,82 @@ class SpeedPolicy:
         for role, raw_target in target_speeds.items():
             direct[role] = int(max(0, min(100, raw_target)))
         return direct
+
+    def _apply_oscillation_guard(self, role: str, target_speed: int, target_temp: float, state: Dict[str, Any]) -> int:
+        """Detect repeated up/down swings and temporarily hold a stable speed.
+
+        Minimises audible hunting by watching speed direction reversals within a
+        recent time window while temperatures remain below a configurable
+        ceiling (i.e. not a real sustained load).
+        """
+        if not self.anti_oscillation_enabled:
+            return target_speed
+
+        now = time.monotonic()
+        history: Deque[tuple[float, int, float]] = state.setdefault('osc_history', deque())
+        history.append((now, int(target_speed), float(target_temp)))
+
+        # Drop samples outside the observation window
+        window = self.oscillation_window_seconds
+        while history and now - history[0][0] > window:
+            history.popleft()
+
+        hold_until = float(state.get('osc_hold_until', 0.0) or 0.0)
+        hold_speed = state.get('osc_hold_speed')
+
+        # Continue holding previously detected steady speed if active
+        if hold_speed is not None and hold_until > now:
+            return int(max(target_speed, hold_speed))
+        if hold_until and hold_until <= now:
+            state['osc_hold_until'] = 0.0
+            state['osc_hold_speed'] = None
+
+        if not history:
+            return target_speed
+
+        temps = [t for _, _, t in history]
+        max_temp = max(temps)
+        if max_temp > self.oscillation_temp_ceiling:
+            # Real workload; don't interfere
+            return target_speed
+
+        speeds = [s for _, s, _ in history]
+        flips = self._count_direction_flips(speeds, self.oscillation_speed_delta)
+        if flips >= self.oscillation_required_flips and len(history) >= 4:
+            steady_speed = int(statistics.median(speeds))
+            steady_speed = max(self.min_speed, min(self.max_speed, steady_speed))
+            state['osc_hold_speed'] = steady_speed
+            state['osc_hold_until'] = now + self.oscillation_hold_seconds
+            self.logger.info(
+                "Detected fan oscillation for %s (flips=%d over %.0fs, max temp %.1f°C). Holding %d%% for %.0fs",
+                role,
+                flips,
+                window,
+                max_temp,
+                steady_speed,
+                self.oscillation_hold_seconds,
+            )
+            return int(max(target_speed, steady_speed))
+
+        return target_speed
+
+    def _count_direction_flips(self, speeds: list[int], min_delta: int) -> int:
+        """Count how many times speed direction changed by at least min_delta."""
+        flips = 0
+        last_dir = 0
+        last = None
+        for val in speeds:
+            if last is None:
+                last = val
+                continue
+            delta = val - last
+            direction = 1 if delta > min_delta else -1 if delta < -min_delta else 0
+            if direction and last_dir and direction != last_dir:
+                flips += 1
+            if direction:
+                last_dir = direction
+            last = val
+        return flips
 
     # Internal helpers
     def _target_percent(self, target_temp: float, current_percent: int, hysteresis: int, max_speed: int) -> int:
